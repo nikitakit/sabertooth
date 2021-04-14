@@ -1,0 +1,23 @@
+[package]
+name = "sabertooth_pipeline"
+version = "0.1.0"
+authors = ["Nikita Kitaev <nikitakit@gmail.com>"]
+edition = "2018"
+
+[lib]
+name = "sabertooth_pipeline"
+crate-type = ["cdylib"]
+
+[dependencies]
+numpy = "0.13"
+ndarray = "0.14"
+punkt_stable = { version = "*", git = "https://github.com/AimainaHito/rust-punkt", rev = "66b64f57f2799ba7b62843720cc2ebeddfeb08e7" }
+pyo3 = "0.13"
+rand = "0.8.3"
+rayon = "1.5.0"
+sentencepiece = "0.7.0"
+serde_json = "1.0.64"
+zstd = "0.6.1"
+
+[features]
+default = ["pyo3/extension-module"]
