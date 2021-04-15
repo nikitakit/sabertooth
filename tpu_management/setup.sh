@@ -9,7 +9,7 @@ export PATH="$HOME/.local/bin:$PATH"
 cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
 
 # Install key dependencies
-pushd sabertooth && git checkout pushbranch && git checkout -b master && popd
+pushd sabertooth && git checkout pushbranch && git checkout -b main && popd
 pip3 install --user --upgrade -r sabertooth/requirements_tpu.txt
 
 # Install Flax
