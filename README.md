@@ -179,9 +179,17 @@ OUTPUT_DIR="$HOME/glue"
 ./sweep_glue.sh /path/to/checkpoint/folder $OUTPUT_DIR 5e-5 4e-5 3e-5 2e-5
 ```
 
-Here are the results from one such sweep, using a "base" size model trained with batch size 4096 for 125K steps (see the training command above). The learning rates the sweep found are random to some extent, since the sweep doubles as both a learning rate search and a chance to try different random seeds.
+Here are the results from one such sweep, using a "base" size model trained with batch size 1024 for 1M steps (see the single-host training command above). Our understanding is that this option most closely approximates the total compute resources used to train the original BERT-base, except that we do not increase the sequence length to 512 at any point during training. The learning rates the sweep found are random to some extent, since the sweep doubles as both a learning rate search and a chance to try different random seeds.
 
-|      | CoLA | SST-2 | MRPC (f1/a) | STS-B       | QQP (f1/acc) | MNLI (m/mm) | QNLI | RTE  |
+|      | CoLA | SST-2 | MRPC (f1/a) | STS-B (p/s) | QQP (f1/acc) | MNLI (m/mm) | QNLI | RTE  |
+|------|------|-------|-------------|-------------|--------------|-------------|------|------|
+| dev  | 56.5 | 91.9  | 90.8 / 87.3 | 88.3 / 88.4 |  87.0 / 90.4 | 84.9 / 85.5 | 92.1 | 70.4 |
+| test | 57.0 | 92.5  | 87.3 / 82.8 | 87.8 / 87.0 |  71.3 / 89.1 | 85.1 / 84.3 | 92.1 | 66.7 |
+| lr   | 3e-5 | 3e-5  |        3e-5 |        5e-5 |         3e-5 |        2e-5 | 3e-5 | 5e-5 |
+
+Here are the results from another "base" size model, this time trained with batch size 4096 for 125K steps (see the multi-host training command above). Note that model only sees half the number of examples compared to the single-host training command above.
+
+|      | CoLA | SST-2 | MRPC (f1/a) | STS-B (p/s) | QQP (f1/acc) | MNLI (m/mm) | QNLI | RTE  |
 |------|------|-------|-------------|-------------|--------------|-------------|------|------|
 | dev  | 60.3 | 91.9  | 89.6 / 85.5 | 87.9 / 88.1 |  87.2 / 90.6 | 84.7 / 85.0 | 91.7 | 68.6 |
 | test | 51.9 | 92.1  | 88.8 / 84.7 | 86.2 / 85.0 |  70.9 / 89.0 | 84.5 / 84.0 | 91.5 | 65.9 |
