@@ -14,12 +14,9 @@
 
 """Run sequence-level classification (and regression) fine-tuning."""
 
-import dataclasses
 import datetime
-import functools
 import logging
 import os
-import typing
 
 import datasets
 import jax
