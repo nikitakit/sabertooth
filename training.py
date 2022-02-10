@@ -255,11 +255,11 @@ def create_eval_fn(model, stat_fn, sample_feature_name="idx"):
 
 def harmonize_across_hosts(optimizer):
     """Ensure that model and optimizer parameters are identical for all hosts."""
-    if jax.host_count() == 1:
+    if jax.process_count() == 1:
         return optimizer
     else:
         selector = jnp.zeros(jax.local_device_count())
-        if jax.host_id() == 0:
+        if jax.process_index() == 0:
             selector = jax.ops.index_update(selector, 0, 1.0)
         optimizer = jax.pmap(
             lambda opt, sel: jax.tree_map(

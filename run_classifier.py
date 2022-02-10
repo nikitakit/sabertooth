@@ -28,7 +28,7 @@ import ml_collections
 import numpy as np
 import transformers
 from absl import app, flags
-from flax import nn, optim
+from flax import optim
 from ml_collections.config_flags import config_flags
 from tensorflow.io import gfile
 

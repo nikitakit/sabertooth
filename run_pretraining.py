@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl import app, flags
-from flax import nn, optim
+from flax import optim
 from flax.training import checkpoints
 from ml_collections.config_flags import config_flags
 from tensorflow.io import gfile
@@ -211,11 +211,11 @@ def main(argv):
 
     if config.do_train:
         train_batch_size = config.train_batch_size
-        if jax.host_count() > 1:
+        if jax.process_count() > 1:
             assert (
-                train_batch_size % jax.host_count() == 0
-            ), "train_batch_size must be divisible by number of hosts"
-            train_batch_size = train_batch_size // jax.host_count()
+                train_batch_size % jax.process_count() == 0
+            ), "train_batch_size must be divisible by number of processes"
+            train_batch_size = train_batch_size // jax.process_count()
         train_iter = data_pipeline.get_inputs(
             batch_size=train_batch_size, training=True
         )
@@ -227,7 +227,7 @@ def main(argv):
 
         for step, batch in zip(range(start_step, config.num_train_steps), train_iter):
             optimizer, train_state = train_step_fn(optimizer, batch, train_state)
-            if jax.host_id() == 0 and (
+            if jax.process_index() == 0 and (
                 step % config.save_checkpoints_steps == 0
                 or step == config.num_train_steps - 1
             ):

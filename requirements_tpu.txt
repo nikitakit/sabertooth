@@ -3,8 +3,8 @@ datasets==1.5.0
 ipykernel==5.3.4
 ipython==7.16.1
 ipywidgets==7.5.1
-jax==0.2.11
-jaxlib==0.1.64
+--find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+jax[tpu]>=0.2.16
 jedi==0.17.2
 jupyter-client==6.1.7
 jupyter-core==4.6.3

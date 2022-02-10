@@ -15,12 +15,12 @@ Sabertooth is standalone pre-training recipe based on JAX+Flax, with data pipeli
 
 ### Automatic installation in TPU VMs
 
-The TPU code is not intended to work with the "JAX Cloud TPU Preview" that uses tpu_driver, but rather only with the "new JAX on Cloud TPU in private alpha" that involves direct SSH access. In order to sign up for private alpha access, please [follow this link](http://goo.gle/jax-tpu-signup).
+This TPU code is intended to work with JAX TPU VMs as documented in the [JAX on Cloud TPU VM quickstart](https://cloud.google.com/tpu/docs/jax-quickstart-tpu-vm).
 
 Rather than creating VMs manually and installing dependencies by hand, you can use the scripts in `tpu_management` to help with this.
 
 Before using these scripts:
-- Follow the one-time setup instructions in the "Cloud TPU VM Alpha User Guide" document up to (but not including) the point where you actually create a TPU VM.
+- Follow the one-time setup instructions in the [JAX on Cloud TPU VM quickstart](https://cloud.google.com/tpu/docs/jax-quickstart-tpu-vm) up to (but not including) the point where you actually create a TPU VM.
 - Then follow the instructions in `tpu_management/config.env.template` to set configuration variables used by the TPU management scripts.
 
 After that, the following TPU management commands are available:
