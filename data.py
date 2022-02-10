@@ -44,7 +44,6 @@ class HfDataPipeline(DataPipeline):
             batch_size=batch_size,
             drop_last=training,
             shuffle=training,
-            num_workers=64,
         )
         if training:
             while True:

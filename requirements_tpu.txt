@@ -1,5 +1,5 @@
 absl-py==0.12.0
-datasets==1.5.0
+datasets==1.18.3
 ipykernel==5.3.4
 ipython==7.16.1
 ipywidgets==7.5.1
