@@ -1,21 +1,21 @@
-absl-py==0.12.0
+absl-py==0.15.0
 datasets==1.18.3
-ipykernel==5.3.4
-ipython==7.16.1
-ipywidgets==7.5.1
+ipykernel==6.9.1
+ipython==8.0.1
+ipywidgets==7.6.5
 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 jax[tpu]>=0.2.16
-jedi==0.17.2
-jupyter-client==6.1.7
-jupyter-core==4.6.3
-maturin==0.9.4
-ml-collections==0.1.0
-notebook==6.1.4
+jedi==0.18.1
+jupyter-client==7.1.2
+jupyter-core==4.9.2
+maturin==0.12.9
+ml-collections==0.1.1
+notebook==6.4.8
 optax==0.1.1
-sentencepiece==0.1.95
-scikit-learn==0.23.2
+scikit-learn==1.0.2
+sentencepiece==0.1.96
 --find-links https://download.pytorch.org/whl/torch_stable.html
 torch==1.8.1+cpu
-tqdm==4.49.0
-transformers==4.5.1
-widgetsnbextension==3.5.1
+tqdm==4.62.3
+transformers==4.16.2
+widgetsnbextension==3.5.2
