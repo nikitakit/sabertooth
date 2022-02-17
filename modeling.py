@@ -230,7 +230,7 @@ class BertForSequenceClassification(nn.Module):
         # If we switch to a non-static method, flax will complain that we're
         # creating an OutputProjection module here.
         params["classification"] = layers.OutputProjection(n_out=model.n_classes).init(
-            jax.random.PRNGKey(np.random.randint(2 ** 16)),
+            jax.random.PRNGKey(np.random.randint(2**16)),
             jnp.zeros(
                 (1, model.config.hidden_size),
                 dtype=params["classification"]["kernel"].dtype,
