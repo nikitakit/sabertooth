@@ -216,7 +216,10 @@ class BertForSequenceClassification(nn.Module):
     def params_from_checkpoint(model, checkpoint):
         """Initialize params (but not optimizer) from a pre-trained checkpoint."""
         restored = restore_checkpoint(checkpoint, target=None)
-        params = restored["target"]
+        if "target" in restored:
+            params = restored["target"]  # For old checkpoints using flax.optim
+        else:
+            params = restored["params"]  # For newer checkpoints using optax
 
         # Delete the masked lm head
         del params["predictions_output"]
@@ -338,7 +341,10 @@ class BertForPreTraining(nn.Module):
     def params_from_checkpoint(model, checkpoint):
         """Initialize params (but not optimizer) from a pre-trained checkpoint."""
         restored = restore_checkpoint(checkpoint, target=None)
-        params = restored["target"]
+        if "target" in restored:
+            params = restored["target"]  # For old checkpoints using flax.optim
+        else:
+            params = restored["params"]  # For newer checkpoints using optax
         # Convert any numpy arrays (which live CPU) to JAX DeviceArrays
         params = jax.tree_map(jnp.asarray, params)
         # Always use a FrozenDict to store params. If different container types are

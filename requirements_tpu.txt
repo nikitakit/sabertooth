@@ -11,6 +11,7 @@ jupyter-core==4.6.3
 maturin==0.9.4
 ml-collections==0.1.0
 notebook==6.1.4
+optax==0.1.1
 sentencepiece==0.1.95
 scikit-learn==0.23.2
 --find-links https://download.pytorch.org/whl/torch_stable.html

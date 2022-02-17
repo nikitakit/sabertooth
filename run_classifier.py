@@ -25,7 +25,6 @@ import ml_collections
 import numpy as np
 import transformers
 from absl import app, flags
-from flax import optim
 from ml_collections.config_flags import config_flags
 from tensorflow.io import gfile
 
@@ -93,7 +92,7 @@ def get_initial_params(model, init_checkpoint=None):
         def initialize_model():
             dummy_input = jnp.zeros((1, 1), dtype=jnp.int32)
             return model.init(
-                jax.random.PRNGKey(np.random.randint(2 ** 16)),
+                jax.random.PRNGKey(np.random.randint(2**16)),
                 input_ids=dummy_input,
                 input_mask=dummy_input,
                 type_ids=dummy_input,
@@ -105,39 +104,9 @@ def get_initial_params(model, init_checkpoint=None):
         return variable_dict["params"]
 
 
-def create_optimizer(config, params):
-    if config.optimizer == "adam":
-        optimizer_cls = optim.Adam
-    elif config.optimizer == "lamb":
-        optimizer_cls = optim.LAMB
-    else:
-        raise ValueError("Unsupported value for optimizer: {config.optimizer}")
-    common_kwargs = dict(
-        learning_rate=config.learning_rate,
-        beta1=config.adam_beta1,
-        beta2=config.adam_beta2,
-        eps=config.adam_epsilon,
-    )
-    optimizer_decay_def = optimizer_cls(
-        weight_decay=config.weight_decay, **common_kwargs
-    )
-    optimizer_no_decay_def = optimizer_cls(weight_decay=0.0, **common_kwargs)
-
-    def exclude_from_decay(path, _):
-        return "bias" in path or "layer_norm" in path or "layernorm" in path
-
-    decay = optim.ModelParamTraversal(lambda *args: not exclude_from_decay(*args))
-    no_decay = optim.ModelParamTraversal(exclude_from_decay)
-    optimizer_def = optim.MultiOptimizer(
-        (decay, optimizer_decay_def), (no_decay, optimizer_no_decay_def)
-    )
-    optimizer = optimizer_def.create(params)
-    return optimizer
-
-
-def compute_loss_and_metrics(model, batch, variables, rngs):
+def compute_loss_and_metrics(apply_fn, variables, batch, rngs):
     """Compute cross-entropy loss for classification tasks."""
-    metrics = model.apply(
+    metrics = apply_fn(
         variables,
         batch["input_ids"],
         batch["input_mask"],
@@ -148,8 +117,8 @@ def compute_loss_and_metrics(model, batch, variables, rngs):
     return metrics["loss"], metrics
 
 
-def compute_classification_stats(model, batch, variables):
-    y = model.apply(
+def compute_classification_stats(apply_fn, variables, batch):
+    y = apply_fn(
         variables,
         batch["input_ids"],
         batch["input_mask"],
@@ -159,8 +128,8 @@ def compute_classification_stats(model, batch, variables):
     return {"idx": batch["idx"], "label": batch["label"], "prediction": y.argmax(-1)}
 
 
-def compute_regression_stats(model, batch, variables):
-    y = model.apply(
+def compute_regression_stats(apply_fn, variables, batch):
+    y = apply_fn(
         variables,
         batch["input_ids"],
         batch["input_mask"],
@@ -193,7 +162,6 @@ def main(argv):
         num_train_examples * config.num_train_epochs // config.train_batch_size
     )
     warmup_steps = int(config.warmup_proportion * num_train_steps)
-    cooldown_steps = num_train_steps - warmup_steps
 
     is_regression_task = dataset["train"].features["label"].dtype == "float32"
     if is_regression_task:
@@ -207,37 +175,41 @@ def main(argv):
         config=config.model, n_classes=num_classes
     )
     initial_params = get_initial_params(model, init_checkpoint=config.init_checkpoint)
-    optimizer = create_optimizer(config, initial_params)
-    del initial_params  # the optimizer takes ownership of all params
-    optimizer = optimizer.replicate()
-    optimizer = training.harmonize_across_hosts(optimizer)
-
-    learning_rate_fn = training.create_learning_rate_scheduler(
-        factors="constant * linear_warmup * linear_decay",
-        base_learning_rate=config.learning_rate,
+    tx = training.create_optimizer(
+        optimizer=config.optimizer,
+        b1=config.adam_beta1,
+        b2=config.adam_beta2,
+        eps=config.adam_epsilon,
+        weight_decay=config.weight_decay,
+        max_grad_norm=config.max_grad_norm,
+        learning_rate=config.learning_rate,
         warmup_steps=warmup_steps,
-        steps_per_cycle=cooldown_steps,
+        total_steps=num_train_steps,
     )
+    state = training.TrainState.create(
+        apply_fn=model.apply,
+        params=initial_params,
+        tx=tx,
+        train_rngs={"dropout": jax.random.PRNGKey(np.random.randint(2**16))},
+        history=training.MetricHistory(),
+    )
+    del initial_params  # the state takes ownership of all params
+    state = state.replicate()
 
     output_dir = get_output_dir(config)
     gfile.makedirs(output_dir)
 
-    train_history = training.TrainStateHistory(learning_rate_fn)
-    train_state = train_history.initial_state()
-
     if config.do_train:
-        train_step_fn = training.create_train_step(
-            model, compute_loss_and_metrics, max_grad_norm=config.max_grad_norm
-        )
+        train_step_fn = training.create_train_step(compute_loss_and_metrics)
         train_iter = data_pipeline.get_inputs(
             split="train", batch_size=config.train_batch_size, training=True
         )
 
         for step, batch in zip(range(0, num_train_steps), train_iter):
-            optimizer, train_state = train_step_fn(optimizer, batch, train_state)
+            state = train_step_fn(state, batch)
 
     if config.do_eval:
-        eval_step = training.create_eval_fn(model, compute_stats)
+        eval_fn = training.create_eval_fn(compute_stats)
         eval_results = []
 
         if config.dataset_path == "glue" and config.dataset_name == "mnli":
@@ -249,7 +221,7 @@ def main(argv):
             eval_iter = data_pipeline.get_inputs(
                 split=split, batch_size=config.eval_batch_size, training=False
             )
-            eval_stats = eval_step(optimizer, eval_iter)
+            eval_stats = eval_fn(state, eval_iter)
             eval_metric = datasets.load_metric(config.dataset_path, config.dataset_name)
             eval_metric.add_batch(
                 predictions=eval_stats["prediction"], references=eval_stats["label"]
@@ -267,8 +239,7 @@ def main(argv):
                 f.write(line + "\n")
 
     if config.do_predict:
-        predict_step = training.create_eval_fn(model, compute_stats)
-        predict_results = []
+        predict_fn = training.create_eval_fn(compute_stats)
 
         path_map = {
             ("glue", "cola", "test"): "CoLA.tsv",
@@ -305,7 +276,7 @@ def main(argv):
             predict_iter = data_pipeline.get_inputs(
                 split=split, batch_size=config.eval_batch_size, training=False
             )
-            predict_stats = predict_step(optimizer, predict_iter)
+            predict_stats = predict_fn(state, predict_iter)
             idxs = predict_stats["idx"]
             predictions = predict_stats["prediction"]
 

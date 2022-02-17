@@ -15,94 +15,26 @@
 """Helper utilities for training."""
 
 import time
-from typing import Any
+from typing import Any, Dict, Optional
 
 import jax
 import numpy as np
-from flax import struct
-from flax.training import common_utils
+import optax
+from flax import jax_utils, struct
+from flax.training import common_utils, train_state
 from jax import numpy as jnp
 
 
-def create_learning_rate_scheduler(
-    factors="constant * linear_warmup * rsqrt_decay",
-    base_learning_rate=0.5,
-    warmup_steps=1000,
-    decay_factor=0.5,
-    steps_per_decay=20000,
-    steps_per_cycle=100000,
-):
-    """Creates learning rate schedule.
+class MetricHistory:
+    """Container for reporting training metrics.
 
-    Interprets factors in the factors string which can consist of:
-    * constant: interpreted as the constant value,
-    * linear_warmup: interpreted as linear warmup until warmup_steps,
-    * rsqrt_decay: divide by square root of max(step, warmup_steps)
-    * decay_every: Every k steps decay the learning rate by decay_factor.
-    * cosine_decay: Cyclic cosine decay, uses steps_per_cycle parameter.
-    * linear_decay: Linear decay, uses steps_per_cycle parameter.
-
-    Args:
-      factors: a string with factors separated by '*' that defines the schedule.
-      base_learning_rate: float, the starting constant for the lr schedule.
-      warmup_steps: how many steps to warm up for in the warmup schedule.
-      decay_factor: The amount to decay the learning rate by.
-      steps_per_decay: How often to decay the learning rate.
-      steps_per_cycle: Steps per cycle when using cosine decay.
-
-    Returns:
-      a function learning_rate(step): float -> {'learning_rate': float}, the
-      step-dependent lr.
-    """
-    factors = [n.strip() for n in factors.split("*")]
-
-    def step_fn(step):
-        """Step to learning rate function."""
-        ret = 1.0
-        for name in factors:
-            if name == "constant":
-                ret *= base_learning_rate
-            elif name == "linear_warmup":
-                ret *= jnp.minimum(1.0, step / warmup_steps)
-            elif name == "rsqrt_decay":
-                ret /= jnp.sqrt(jnp.maximum(step, warmup_steps))
-            elif name == "rsqrt_normalized_decay":
-                ret *= jnp.sqrt(warmup_steps)
-                ret /= jnp.sqrt(jnp.maximum(step, warmup_steps))
-            elif name == "decay_every":
-                ret *= decay_factor ** (step // steps_per_decay)
-            elif name == "cosine_decay":
-                progress = jnp.maximum(
-                    0.0, (step - warmup_steps) / float(steps_per_cycle)
-                )
-                ret *= jnp.maximum(
-                    0.0, 0.5 * (1.0 + jnp.cos(jnp.pi * (progress % 1.0)))
-                )
-            elif name == "linear_decay":
-                progress = jnp.maximum(
-                    0.0, (step - warmup_steps) / float(steps_per_cycle)
-                )
-                ret *= 1.0 - progress
-            else:
-                raise ValueError("Unknown factor %s." % name)
-        return jnp.asarray(ret, dtype=jnp.float32)
-
-    return step_fn
-
-
-class TrainStateHistory:
-    """Container for training history/metrics.
-
-    The eventual design goal is to have this container store a long of all
-    training metrics, as well as handle logging them (including to tensorboard).
-    The learning rate can be a function of training history, for example in
-    approaches that decay the learning rate whenever validation performance stops
-    improving. Therefore the learning rate calculation also belongs here, though
-    the current API still needs work.
+    Currently this only handles periodic logging, but the eventual design goal
+    is to also allow this to store any metric history needed for training
+    (e.g. for learning rate decay based on lack of improvement on a certain
+    metric.)
     """
 
-    def __init__(self, learning_rate_fn, print_every=200):
-        self.learning_rate_fn = learning_rate_fn
+    def __init__(self, print_every=200):
         self.print_every = print_every
         self.last_printed = None
         self.estimated_step = 0
@@ -110,19 +42,25 @@ class TrainStateHistory:
     def write(self, step, metrics):
         """TODO(kitaev): doc."""
         # The canonical value of the training step we're in (the "step" argument)
-        # is stored on TPU, and transfering to the CPU in order to do a comparison
-        # would substantially slow down training.
-        # TODO(kitaev): find a solution that doesn't involve this hacky duplicate
-        # estimated_step variable.
+        # may be stored on TPU, in which case transfering to the CPU in order to
+        # do a comparison would substantially slow down training.
         if self.estimated_step % self.print_every != 0:
             self.estimated_step += 1
             return
-        self.estimated_step = int(step) + 1
+        if not isinstance(step, int):
+            if step.ndim == 0:
+                step = step.item()
+            else:
+                step = step[0].item()
+        self.estimated_step = step
+
         # Only retrieve metrics from the device if they are actually used.
-        metrics = jax.tree_map(lambda x: x[0].item(), metrics)
+        metrics = jax.tree_map(
+            lambda x: x[0].item() if x.ndim > 0 else x.item(), metrics
+        )
         for i, k in enumerate(sorted(metrics)):
             if i == 0:
-                line = f"Step {step:<7d} {k} = {metrics[k]}"
+                line = f"Step {step-1:<7d} {k} = {metrics[k]}"
             else:
                 line = f"             {k} = {metrics[k]}"
             print(line, flush=True)
@@ -135,94 +73,109 @@ class TrainStateHistory:
             print(line, flush=True)
         self.last_printed = (step, now)
 
-    def initial_state(self):
-        return TrainState(
-            history=self,
-            rng=common_utils.shard_prng_key(
-                jax.random.PRNGKey(np.random.randint(2 ** 16))
+
+class TrainState(train_state.TrainState):
+    train_rngs: Optional[Dict[str, Any]]
+    history: MetricHistory = struct.field(pytree_node=False)
+
+    def replicate(self):
+        train_rngs = jax.tree_map(common_utils.shard_prng_key, self.train_rngs)
+        replicated = jax_utils.replicate(self)
+        replicated = harmonize_across_hosts(replicated)
+        replicated = replicated.replace(train_rngs=train_rngs)
+        return replicated
+
+    def unreplicate(self):
+        return jax_utils.unreplicate(self)
+
+
+def create_optimizer(
+    optimizer,
+    b1,
+    b2,
+    eps,
+    weight_decay,
+    max_grad_norm,
+    learning_rate,
+    warmup_steps,
+    total_steps,
+):
+    tx_chain = []
+
+    if max_grad_norm:
+        tx_chain.append(optax.clip_by_global_norm(max_grad_norm))
+
+    tx_chain.extend(
+        [
+            optax.scale_by_adam(b1=b1, b2=b2, eps=eps),
+            optax.add_decayed_weights(
+                weight_decay, lambda p: jax.tree_map(lambda x: x.ndim != 1, p)
             ),
-            step=None,
-            metrics=None,
-        )
+        ]
+    )
+
+    if optimizer == "adam":
+        pass
+    elif optimizer == "lamb":
+        tx_chain.append(optax.scale_by_trust_ratio())
+    else:
+        raise ValueError("Unsupported value for optimizer: {optimizer}")
+
+    schedule = optax.join_schedules(
+        [
+            optax.linear_schedule(
+                init_value=0.0, end_value=learning_rate, transition_steps=warmup_steps
+            ),
+            optax.linear_schedule(
+                init_value=learning_rate,
+                end_value=0.0,
+                transition_steps=total_steps - warmup_steps,
+            ),
+        ],
+        [warmup_steps],
+    )
+    tx_chain.append(optax.scale_by_schedule(lambda count: -1 * schedule(count)))
+    tx = optax.chain(*tx_chain)
+    return tx
 
 
-@struct.dataclass
-class TrainState:
-    """Container for misc training state that's not handeled by the optimizer.
+def create_train_step(loss_and_metrics_fn):
+    def train_step(state, batch):
+        train_rngs, rng_treedef = jax.tree_flatten(state.train_rngs)
+        split_rngs = [jax.random.split(rng) for rng in train_rngs]
+        step_rngs = jax.tree_unflatten(rng_treedef, [x[0] for x in split_rngs])
+        new_train_rngs = jax.tree_unflatten(rng_treedef, [x[1] for x in split_rngs])
 
-    This includes:
-    - The base RNG key for each step, replicated across devices.
-    - Any metrics output by the training step (that are then logged to the history
-      object)
-    """
-
-    history: TrainStateHistory = struct.field(pytree_node=False)
-    rng: Any
-    step: Any
-    metrics: Any
-
-    def take_step(self, optimizer, grad, metrics, rng):
-        if isinstance(optimizer.state, (list, tuple)):
-            step = optimizer.state[0].step
-        else:
-            step = optimizer.state.step
-        new_optimizer = optimizer.apply_gradient(
-            grad, learning_rate=self.history.learning_rate_fn(step)
-        )
-        new_train_state = self.replace(rng=rng, step=step, metrics=metrics)
-        return new_optimizer, new_train_state
-
-    def write_history(self):
-        step = self.step[0]
-        self.history.write(step, self.metrics)
-        return self.replace(step=None, metrics=None)
-
-
-def create_train_step(model, loss_and_metrics_fn, max_grad_norm=None):
-    """Constructs a function that runs a single training update."""
-
-    def train_step(optimizer, batch, train_state):
-        rng, new_rng = jax.random.split(train_state.rng)
-        rngs = {"dropout": rng}
         grad_fn = jax.value_and_grad(
-            lambda params: loss_and_metrics_fn(model, batch, {"params": params}, rngs),
+            lambda params: loss_and_metrics_fn(
+                state.apply_fn, {"params": params}, batch, step_rngs
+            ),
             has_aux=True,
         )
-        (unused_loss, metrics), grad = grad_fn(optimizer.target)
-        grad = jax.lax.pmean(grad, "batch")
-        if max_grad_norm is not None:
-            grad_norm = sum([jnp.sum(x ** 2) for x in jax.tree_leaves(grad)])
-            metrics["grad_norm"] = grad_norm
-            grad_scale = jnp.where(
-                grad_norm < max_grad_norm, 1.0, max_grad_norm / grad_norm
-            )
-            grad = jax.tree_map(lambda x: x * grad_scale, grad)
-        new_optimizer, new_train_state = train_state.take_step(
-            optimizer, grad, metrics, new_rng
-        )
-        return new_optimizer, new_train_state
+        (unused_loss, metrics), grads = grad_fn(state.params)
+        grads = jax.lax.pmean(grads, "batch")
+        new_state = state.apply_gradients(grads=grads, train_rngs=new_train_rngs)
+        return new_state, metrics
 
     p_train_step = jax.pmap(train_step, axis_name="batch", donate_argnums=(0,))
 
-    def distributed_train_step(optimizer, batch, train_state):
-        new_optimizer, new_train_state = p_train_step(
-            optimizer, common_utils.shard(batch), train_state
-        )
-        new_train_state = new_train_state.write_history()
-        return new_optimizer, new_train_state
+    def distributed_train_step(state, batch):
+        new_state, metrics = p_train_step(state, common_utils.shard(batch))
+        new_state.history.write(new_state.step, metrics)
+        return new_state
 
     return distributed_train_step
 
 
-def create_eval_fn(model, stat_fn, sample_feature_name="idx"):
+def create_eval_fn(stat_fn, sample_feature_name="idx"):
     """Constructs a function that runs evaluation given a batched data stream."""
     p_stat_fn = jax.pmap(
-        lambda params, batch: stat_fn(model, batch, {"params": params}),
+        lambda state, batch: stat_fn(state.apply_fn, {"params": state.params}, batch),
         axis_name="batch",
     )
     n_devices = jax.local_device_count()
 
-    def eval_step_fn(optimizer, batch, all_stats):
+    def eval_step_fn(state, batch, all_stats):
         batch_size = batch[sample_feature_name].shape[0]
         remainder = batch_size % n_devices
         if remainder:
@@ -234,17 +187,17 @@ def create_eval_fn(model, stat_fn, sample_feature_name="idx"):
 
             batch = jax.tree_map(pad, batch)
         batch = common_utils.shard(batch)
-        stats = p_stat_fn(optimizer.target, batch)
+        stats = p_stat_fn(state, batch)
         stats = jax.tree_map(np.array, stats)
         stats = jax.tree_map(lambda x: x.reshape((-1,) + x.shape[2:]), stats)
         if remainder:
             stats = jax.tree_map(lambda x: x[:-pad_amount], stats)
         all_stats.append(stats)
 
-    def eval_fn(optimizer, data_stream):
+    def eval_fn(state, data_stream):
         all_stats = []
         for batch in data_stream:
-            eval_step_fn(optimizer, batch, all_stats)
+            eval_step_fn(state, batch, all_stats)
         res = {}
         for k in all_stats[0]:
             res[k] = np.concatenate([stats[k] for stats in all_stats], axis=0)

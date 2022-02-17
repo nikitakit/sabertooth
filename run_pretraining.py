@@ -25,7 +25,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl import app, flags
-from flax import optim
 from flax.training import checkpoints
 from ml_collections.config_flags import config_flags
 from tensorflow.io import gfile
@@ -69,7 +68,7 @@ def get_initial_params(model, init_checkpoint=None):
         def initialize_model():
             dummy_input = jnp.zeros((1, 1), dtype=jnp.int32)
             return model.init(
-                jax.random.PRNGKey(np.random.randint(2 ** 16)),
+                jax.random.PRNGKey(np.random.randint(2**16)),
                 input_ids=dummy_input,
                 input_mask=dummy_input,
                 type_ids=dummy_input,
@@ -81,39 +80,9 @@ def get_initial_params(model, init_checkpoint=None):
         return variable_dict["params"]
 
 
-def create_optimizer(config, params):
-    if config.optimizer == "adam":
-        optimizer_cls = optim.Adam
-    elif config.optimizer == "lamb":
-        optimizer_cls = optim.LAMB
-    else:
-        raise ValueError("Unsupported value for optimizer: {config.optimizer}")
-    common_kwargs = dict(
-        learning_rate=config.learning_rate,
-        beta1=config.adam_beta1,
-        beta2=config.adam_beta2,
-        eps=config.adam_epsilon,
-    )
-    optimizer_decay_def = optimizer_cls(
-        weight_decay=config.weight_decay, **common_kwargs
-    )
-    optimizer_no_decay_def = optimizer_cls(weight_decay=0.0, **common_kwargs)
-
-    def exclude_from_decay(path, _):
-        return "bias" in path or "layer_norm" in path or "layernorm" in path
-
-    decay = optim.ModelParamTraversal(lambda *args: not exclude_from_decay(*args))
-    no_decay = optim.ModelParamTraversal(exclude_from_decay)
-    optimizer_def = optim.MultiOptimizer(
-        (decay, optimizer_decay_def), (no_decay, optimizer_no_decay_def)
-    )
-    optimizer = optimizer_def.create(params)
-    return optimizer
-
-
-def compute_pretraining_loss_and_metrics(model, batch, variables, rngs):
+def compute_pretraining_loss_and_metrics(apply_fn, variables, batch, rngs):
     """Compute cross-entropy loss for classification tasks."""
-    metrics = model.apply(
+    metrics = apply_fn(
         variables,
         batch["input_ids"],
         batch["input_mask"],
@@ -127,9 +96,9 @@ def compute_pretraining_loss_and_metrics(model, batch, variables, rngs):
     return metrics["loss"], metrics
 
 
-def compute_pretraining_stats(model, batch, variables):
+def compute_pretraining_stats(apply_fn, variables, batch):
     """Used for computing eval metrics during pre-training."""
-    masked_lm_logits, next_sentence_logits = model.apply(
+    masked_lm_logits, next_sentence_logits = apply_fn(
         variables,
         batch["input_ids"],
         batch["input_mask"],
@@ -137,7 +106,7 @@ def compute_pretraining_stats(model, batch, variables):
         batch["masked_lm_positions"],
         deterministic=True,
     )
-    stats = model.compute_metrics(
+    stats = modeling.BertForPreTraining.compute_metrics(
         masked_lm_logits,
         next_sentence_logits,
         batch["masked_lm_ids"],
@@ -176,21 +145,34 @@ def main(argv):
 
     model = modeling.BertForPreTraining(config=config.model)
     initial_params = get_initial_params(model, init_checkpoint=config.init_checkpoint)
-    optimizer = create_optimizer(config, initial_params)
-    del initial_params  # the optimizer takes ownership of all params
+    tx = training.create_optimizer(
+        optimizer=config.optimizer,
+        b1=config.adam_beta1,
+        b2=config.adam_beta2,
+        eps=config.adam_epsilon,
+        weight_decay=config.weight_decay,
+        max_grad_norm=config.max_grad_norm,
+        learning_rate=config.learning_rate,
+        warmup_steps=config.num_warmup_steps,
+        total_steps=config.num_train_steps,
+    )
+    state = training.TrainState.create(
+        apply_fn=model.apply,
+        params=initial_params,
+        tx=tx,
+        train_rngs={"dropout": jax.random.PRNGKey(np.random.randint(2**16))},
+        history=training.MetricHistory(),
+    )
+    del initial_params  # the state takes ownership of all params
 
     output_dir = get_output_dir(config)
     gfile.makedirs(output_dir)
 
     # Restore from a local checkpoint, if one exists.
-    optimizer = checkpoints.restore_checkpoint(output_dir, optimizer)
-    if isinstance(optimizer.state, (list, tuple)):
-        start_step = int(optimizer.state[0].step)
-    else:
-        start_step = int(optimizer.state.step)
+    state = checkpoints.restore_checkpoint(output_dir, state)
+    start_step = int(state.step)
 
-    optimizer = optimizer.replicate()
-    optimizer = training.harmonize_across_hosts(optimizer)
+    state = state.replicate()
 
     data_pipeline = data.PretrainingDataPipeline(
         sum([glob.glob(pattern) for pattern in config.input_files], []),
@@ -198,16 +180,6 @@ def main(argv):
         max_seq_length=config.max_seq_length,
         max_predictions_per_seq=config.max_predictions_per_seq,
     )
-
-    learning_rate_fn = training.create_learning_rate_scheduler(
-        factors="constant * linear_warmup * linear_decay",
-        base_learning_rate=config.learning_rate,
-        warmup_steps=config.num_warmup_steps,
-        steps_per_cycle=config.num_train_steps - config.num_warmup_steps,
-    )
-
-    train_history = training.TrainStateHistory(learning_rate_fn)
-    train_state = train_history.initial_state()
 
     if config.do_train:
         train_batch_size = config.train_batch_size
@@ -219,19 +191,15 @@ def main(argv):
         train_iter = data_pipeline.get_inputs(
             batch_size=train_batch_size, training=True
         )
-        train_step_fn = training.create_train_step(
-            model,
-            compute_pretraining_loss_and_metrics,
-            max_grad_norm=config.max_grad_norm,
-        )
+        train_step_fn = training.create_train_step(compute_pretraining_loss_and_metrics)
 
         for step, batch in zip(range(start_step, config.num_train_steps), train_iter):
-            optimizer, train_state = train_step_fn(optimizer, batch, train_state)
+            state = train_step_fn(state, batch)
             if jax.process_index() == 0 and (
                 step % config.save_checkpoints_steps == 0
                 or step == config.num_train_steps - 1
             ):
-                checkpoints.save_checkpoint(output_dir, optimizer.unreplicate(), step)
+                checkpoints.save_checkpoint(output_dir, state.unreplicate(), step)
                 config_path = os.path.join(output_dir, "config.json")
                 if not os.path.exists(config_path):
                     with open(config_path, "w") as f:
@@ -249,9 +217,9 @@ def main(argv):
         eval_iter = data_pipeline.get_inputs(batch_size=config.eval_batch_size)
         eval_iter = itertools.islice(eval_iter, config.max_eval_steps)
         eval_fn = training.create_eval_fn(
-            model, compute_pretraining_stats, sample_feature_name="input_ids"
+            compute_pretraining_stats, sample_feature_name="input_ids"
         )
-        eval_stats = eval_fn(optimizer, eval_iter)
+        eval_stats = eval_fn(state, eval_iter)
 
         eval_metrics = {
             "loss": jnp.mean(eval_stats["loss"]),

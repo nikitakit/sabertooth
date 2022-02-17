@@ -143,7 +143,7 @@ For single-host pre-training, run a command such as:
 python3 run_pretraining.py --config=configs/pretraining.py --config.train_batch_size=1024 --config.optimizer="adam" --config.learning_rate=1e-4 --config.num_train_steps=1000000 --config.num_warmup_steps=10000 --config.max_seq_length=128 --config.max_predictions_per_seq=20
 ```
 
-For BERT base, our best hyperparameter setting thus far involves pre-training with global batch size 4096. To launch this training on `TPUv3-32` with 4 hosts, set up each host with the required environment variables and then run the following command:
+For multi-host training on `TPUv3-32` with 4 hosts, set up each host with the required environment variables and then run a command such as:
 ```sh
 python3 run_pretraining.py --config=configs/pretraining.py --config.optimizer="adam" --config.train_batch_size=4096 --config.learning_rate=1e-3 --config.num_train_steps=125000 --config.num_warmup_steps=3125 --config.adam_epsilon=1e-11 --config.adam_beta1=0.9 --config.adam_beta2=0.98 --config.weight_decay=0.1 --config.max_grad_norm=0.4
 ```
@@ -155,7 +155,7 @@ Use `--config.input_files` and `--config.tokenizer` to configure dataset and tok
 Our pre-training recipe is close to BERT, but there are a few differences:
 * We use a SentencePiece unigram tokenizer, instead of WordPiece
 * The next-sentence prediction (NSP) task from BERT is replaced with a sentence order prediction (SOP) from ALBERT. We do this primarily to simplify the data pipeline implementation, but past work has observed SOP to give better results than NSP.
-* BERT's Adam optimizer departs from the Adam paper in that it omits bias correction terms. This codebase uses Flax's implementation of Adam, which includes bias correction.
+* BERT's Adam optimizer departs from the Adam paper in that it omits bias correction terms. This codebase uses Optax's implementation of Adam, which includes bias correction.
 * Pre-training uses a fixed maximum sequence length of 128, and does not increase the sequence length to 512 for the last 10% of training.
 * The wiki+books data used in this repository is designed to match the BERT paper as closely as possible, but it's not identical. The data used by BERT was never publicly available, so most BERT replications have this property.
 * Random masking and sentence shuffling occurs each time a batch of examples is sampled during training, rather than a single time during the data generation step.
